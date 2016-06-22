@@ -972,8 +972,7 @@ class AwsDatabaseCrawler(val name: String, val ctx: AwsCrawler.Context) extends 
     var buffer = new ListBuffer[Record]()
     for (rec <- initial) {
         val data = rec.toMap("data").asInstanceOf[Map[String,String]]
-        val arn = ctx.awsClient.arn("rds", "db",data("DBInstanceIdentifier"))
-        val arnMap = Map("arn" -> arn)
+        val arn = ctx.awsClient.arn("rds", "db", data("DBInstanceIdentifier"))
 
         val request = new ListTagsForResourceRequest().withResourceName(arn)
         val response = ctx.awsClient.rds.listTagsForResource(request)
@@ -981,12 +980,10 @@ class AwsDatabaseCrawler(val name: String, val ctx: AwsCrawler.Context) extends 
           item => {
             ctx.beanMapper(item)
           }).toList
-        val tags = Map("tags" -> responseList)
 
-        buffer += rec.append(arnMap).append(tags)
+        buffer += rec.copy(data = data.asInstanceOf[Map[String,Any]] ++ Map("arn" -> arn, "tags" -> responseList))
     }
-    val list = buffer.toList
-    list
+    buffer.toList
   }
 }
 
