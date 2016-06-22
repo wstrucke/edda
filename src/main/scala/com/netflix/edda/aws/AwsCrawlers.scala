@@ -133,6 +133,8 @@ trait AwsBeanMapper extends BeanMapper {
       flattenTag(basicBeanMapper.fromBean(obj).asInstanceOf[Map[String,Any]])
     case obj : com.amazonaws.services.autoscaling.model.TagDescription =>
       flattenTag(basicBeanMapper.fromBean(obj).asInstanceOf[Map[String,Any]])
+    case obj : com.amazonaws.services.elasticloadbalancing.model.Tag =>
+      flattenTag(basicBeanMapper.fromBean(obj).asInstanceOf[Map[String,Any]])
     case obj : com.amazonaws.services.rds.model.Tag =>
       flattenTag(basicBeanMapper.fromBean(obj).asInstanceOf[Map[String,Any]])
   }
@@ -354,10 +356,43 @@ class AwsImageCrawler(val name: String, val ctx: AwsCrawler.Context) extends Cra
   * @param ctx context to provide beanMapper
   */
 class AwsLoadBalancerCrawler(val name: String, val ctx: AwsCrawler.Context) extends Crawler {
+  private[this] val logger = LoggerFactory.getLogger(getClass)
   val request = new DescribeLoadBalancersRequest
 
-  override def doCrawl()(implicit req: RequestId) = ctx.awsClient.elb.describeLoadBalancers(request).getLoadBalancerDescriptions.asScala.map(
-    item => Record(item.getLoadBalancerName, new DateTime(item.getCreatedTime), ctx.beanMapper(item))).toSeq
+  override def doCrawl()(implicit req: RequestId) = {
+    /* throttle requests to avoid hitting aws api limits */
+    Thread sleep 1000
+    val initial = ctx.awsClient.elb.describeLoadBalancers(request).getLoadBalancerDescriptions.asScala.map(
+      item => Record(item.getLoadBalancerName, new DateTime(item.getCreatedTime), ctx.beanMapper(item))).toSeq
+
+    ctx.awsClient.loadAccountNum()
+
+    var buffer = new ListBuffer[Record]()
+    for (rec <- initial) {
+      try {
+        val data = rec.toMap("data").asInstanceOf[Map[String,String]]
+
+        Thread sleep 1000
+        val request = new com.amazonaws.services.elasticloadbalancing.model.DescribeTagsRequest().withLoadBalancerNames(data("loadBalancerName"))
+        Thread sleep 1000
+        val response = ctx.awsClient.elb.describeTags(request)
+        Thread sleep 1000
+        val responseList = response.getTagDescriptions().asScala.map(
+          item => {
+            ctx.beanMapper(item)
+          }).toSeq
+
+        buffer += rec.copy(data = data.asInstanceOf[Map[String,Any]] ++ Map("tags" -> responseList(0).asInstanceOf[Map[String,Any]]("tags")))
+      } catch {
+        case e: Exception => {
+          logger.error("error retrieving tags for an elb")
+          buffer += rec
+        }
+      }
+    }
+    Thread sleep 2000
+    buffer.toList
+  }
 }
 
 case class AwsInstanceHealthCrawlerState(elbRecords: Seq[Record] = Seq[Record]())
