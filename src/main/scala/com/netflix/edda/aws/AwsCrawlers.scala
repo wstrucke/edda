@@ -61,6 +61,9 @@ import com.amazonaws.services.s3.model.ListBucketsRequest
 import com.amazonaws.services.sqs.model.ListQueuesRequest
 import com.amazonaws.services.sqs.model.GetQueueAttributesRequest
 
+import com.amazonaws.services.cloudformation.model.DescribeStacksRequest
+import com.amazonaws.services.cloudformation.model.ListStackResourcesRequest
+
 import com.amazonaws.services.cloudwatch.model.DescribeAlarmsRequest
 
 import com.amazonaws.services.autoscaling.model.DescribeAutoScalingGroupsRequest
@@ -76,18 +79,18 @@ import com.amazonaws.services.route53.model.ListHostedZonesRequest
 import com.amazonaws.services.route53.model.GetHostedZoneRequest
 import com.amazonaws.services.route53.model.ListResourceRecordSetsRequest
 
+import com.amazonaws.services.elasticache.model.DescribeCacheClustersRequest
+
+import com.amazonaws.services.rds.model.DescribeDBInstancesRequest
+import com.amazonaws.services.rds.model.DescribeDBSubnetGroupsRequest
+import com.amazonaws.services.rds.model.ListTagsForResourceRequest
+
 import collection.JavaConverters._
 
 import java.util.concurrent.Executors
 import java.util.concurrent.Callable
 
 import org.slf4j.LoggerFactory
-import com.amazonaws.services.rds.model.DescribeDBInstancesRequest
-import com.amazonaws.services.rds.model.DescribeDBSubnetGroupsRequest
-import com.amazonaws.services.rds.model.ListTagsForResourceRequest
-import com.amazonaws.services.elasticache.model.DescribeCacheClustersRequest
-import com.amazonaws.services.cloudformation.model.DescribeStacksRequest
-import com.amazonaws.services.cloudformation.model.ListStackResourcesRequest
 
 /** static namespace for out Context trait */
 object AwsCrawler {
@@ -299,7 +302,7 @@ class AwsVpcCrawler(val name: String, val ctx: AwsCrawler.Context) extends Crawl
 }
 
 
-/** crawler for CLoudWatch Alarms
+/** crawler for CloudWatch Alarms
   *
   * @param name name of collection we are crawling for
   * @param ctx context to provide beanMapper
@@ -360,37 +363,42 @@ class AwsLoadBalancerCrawler(val name: String, val ctx: AwsCrawler.Context) exte
   val request = new DescribeLoadBalancersRequest
 
   override def doCrawl()(implicit req: RequestId) = {
-    /* throttle requests to avoid hitting aws api limits */
-    Thread sleep 1000
     val initial = ctx.awsClient.elb.describeLoadBalancers(request).getLoadBalancerDescriptions.asScala.map(
-      item => Record(item.getLoadBalancerName, new DateTime(item.getCreatedTime), ctx.beanMapper(item))).toSeq
+        item => Record(item.getLoadBalancerName, new DateTime(item.getCreatedTime), ctx.beanMapper(item))).toSeq.grouped(20).toList
 
     ctx.awsClient.loadAccountNum()
 
     var buffer = new ListBuffer[Record]()
-    for (rec <- initial) {
-      try {
-        val data = rec.toMap("data").asInstanceOf[Map[String,String]]
 
-        Thread sleep 1000
-        val request = new com.amazonaws.services.elasticloadbalancing.model.DescribeTagsRequest().withLoadBalancerNames(data("loadBalancerName"))
-        Thread sleep 1000
+    for (group <- initial) {
+      var names = new ListBuffer[String]()
+
+      for (rec <- group) {
+        val data = rec.toMap("data").asInstanceOf[Map[String,String]]
+        names += data("loadBalancerName")
+      }
+      try {
+        val request = new com.amazonaws.services.elasticloadbalancing.model.DescribeTagsRequest().withLoadBalancerNames(names)
         val response = ctx.awsClient.elb.describeTags(request)
-        Thread sleep 1000
         val responseList = response.getTagDescriptions().asScala.map(
           item => {
             ctx.beanMapper(item)
           }).toSeq
 
-        buffer += rec.copy(data = data.asInstanceOf[Map[String,Any]] ++ Map("tags" -> responseList(0).asInstanceOf[Map[String,Any]]("tags")))
+        for (rec <- group) {
+          val data = rec.toMap("data").asInstanceOf[Map[String,String]]
+          for (response <- responseList) {
+            if (response.asInstanceOf[Map[String,Any]]("loadBalancerName") == data("loadBalancerName")) {
+              buffer += rec.copy(data = data.asInstanceOf[Map[String,Any]] ++ Map("tags" -> response.asInstanceOf[Map[String,Any]]("tags")))
+            }
+          }
+        }
       } catch {
         case e: Exception => {
           logger.error("error retrieving tags for an elb")
-          buffer += rec
         }
       }
     }
-    Thread sleep 2000
     buffer.toList
   }
 }
