@@ -24,6 +24,8 @@ import java.util.concurrent.TimeUnit
 import com.netflix.servo.monitor.Monitors
 import com.netflix.servo.DefaultMonitorRegistry
 
+import com.amazonaws.AmazonClientException
+
 import org.slf4j.LoggerFactory
 
 /** local state for Crawlers
@@ -56,6 +58,13 @@ abstract class Crawler extends Observable {
 
   private[this] val logger = LoggerFactory.getLogger(getClass)
   lazy val enabled = Utils.getProperty("edda.crawler", "enabled", name, "true")
+
+  /* initial delay in ms between rapid, successive api requests */
+  val request_delay = 200
+  /* number of retries attempted */
+  var retry_count = 0
+  /* maximum number of retries before giving up */
+  val retry_max = 500
 
   /** start a crawl if the crawler is enabled */
   def crawl()(implicit req: RequestId) {
@@ -138,6 +147,36 @@ abstract class Crawler extends Observable {
       setLocalState(state, CrawlerState(records = newRecords))
 
       // } else state
+    }
+  }
+
+  def backoffRequest[T](code: =>T): T = {
+    try {
+      if (retry_count > 10) {
+          Thread sleep ( (request_delay / 1000) * ((retry_count-10) + 1) )
+      }
+      code
+    } catch {
+      case e: AmazonClientException => {
+        val pattern = ".*Error Code: ([A-Za-z]+);.*".r
+        val pattern(err_code) = e.getMessage()
+        if ( (err_code == "RequestLimitExceeded") || (err_code == "Throttling") ) {
+          Thread sleep ( (request_delay / 1000) * (retry_count + 1) )
+          retry_count = retry_count + 1
+          if (retry_count >= retry_max) {
+            logger.error("Hit maximum number of API backoff requests, aborting")
+            throw e
+          }
+          backoffRequest { code }
+        } else {
+          logger.error("Unexpected AmazonClientException, aborting")
+          throw e
+        }
+      }
+      case e: Exception => {
+        logger.error("Unexpected Exception, aborting")
+        throw e
+      }
     }
   }
 
