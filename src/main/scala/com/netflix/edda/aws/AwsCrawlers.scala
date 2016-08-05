@@ -375,6 +375,13 @@ object AwsInstanceHealthCrawler extends StateMachine.LocalState[AwsInstanceHealt
   */
 class AwsInstanceHealthCrawler(val name: String, val ctx: AwsCrawler.Context, val crawler: Crawler) extends Crawler {
 
+  import java.util.concurrent.TimeUnit
+
+  import com.netflix.servo.monitor.Monitors
+  import com.netflix.servo.DefaultMonitorRegistry
+
+  val crawlTimer = Monitors.newTimer("crawl")
+
   import AwsInstanceHealthCrawler._
 
   override def crawl()(implicit req: RequestId) {}
@@ -453,8 +460,14 @@ class AwsInstanceHealthCrawler(val name: String, val ctx: AwsCrawler.Context, va
       implicit val req = gotMsg.req
       // this is blocking so we dont crawl in parallel
       if (elbRecordSet.records ne localState(state).elbRecords) {
+        val stopwatch = crawlTimer.start()
         val newRecords = doCrawl(elbRecordSet.records)
+        stopwatch.stop()
+        if (logger.isInfoEnabled) logger.info("{} {} Crawled {} records in {} sec", Utils.toObjects(
+          req, this, newRecords.size, stopwatch.getDuration(TimeUnit.MILLISECONDS) / 1000D -> "%.2f"))
         Observable.localState(state).observers.foreach(_ ! Crawler.CrawlResult(this, RecordSet(newRecords, Map("source" -> "crawl", "req" -> req.id))))
+        logger.info(s"$req$this RESET RETRY COUNT")
+        retry_count = 0
         setLocalState(Crawler.setLocalState(state, CrawlerState(newRecords)), AwsInstanceHealthCrawlerState(elbRecordSet.records))
       } else state
     }
