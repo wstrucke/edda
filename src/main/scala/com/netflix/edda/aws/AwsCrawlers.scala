@@ -466,7 +466,7 @@ class AwsInstanceHealthCrawler(val name: String, val ctx: AwsCrawler.Context, va
         if (logger.isInfoEnabled) logger.info("{} {} Crawled {} records in {} sec", Utils.toObjects(
           req, this, newRecords.size, stopwatch.getDuration(TimeUnit.MILLISECONDS) / 1000D -> "%.2f"))
         Observable.localState(state).observers.foreach(_ ! Crawler.CrawlResult(this, RecordSet(newRecords, Map("source" -> "crawl", "req" -> req.id))))
-        logger.info(s"$req$this RESET RETRY COUNT")
+        /* reset retry count at end of run for backoff */
         retry_count = 0
         setLocalState(Crawler.setLocalState(state, CrawlerState(newRecords)), AwsInstanceHealthCrawlerState(elbRecordSet.records))
       } else state
