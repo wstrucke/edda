@@ -363,10 +363,10 @@ class AwsLoadBalancerCrawler(val name: String, val ctx: AwsCrawler.Context) exte
   val request = new DescribeLoadBalancersRequest
 
   override def doCrawl()(implicit req: RequestId) = {
-    val initial = ctx.awsClient.elb.describeLoadBalancers(request).getLoadBalancerDescriptions.asScala.map(
+    val initial = backoffRequest { ctx.awsClient.elb.describeLoadBalancers(request).getLoadBalancerDescriptions }.asScala.map(
         item => Record(item.getLoadBalancerName, new DateTime(item.getCreatedTime), ctx.beanMapper(item))).toSeq.grouped(20).toList
 
-    ctx.awsClient.loadAccountNum()
+    backoffRequest { ctx.awsClient.loadAccountNum() }
 
     var buffer = new ListBuffer[Record]()
 
@@ -379,11 +379,12 @@ class AwsLoadBalancerCrawler(val name: String, val ctx: AwsCrawler.Context) exte
       }
       try {
         val request = new com.amazonaws.services.elasticloadbalancing.model.DescribeTagsRequest().withLoadBalancerNames(names)
-        val response = ctx.awsClient.elb.describeTags(request)
-        val responseList = response.getTagDescriptions().asScala.map(
+        val response = backoffRequest { ctx.awsClient.elb.describeTags(request) }
+        val responseList = backoffRequest { response.getTagDescriptions().asScala.map(
           item => {
             ctx.beanMapper(item)
           }).toSeq
+        }
 
         for (rec <- group) {
           val data = rec.toMap("data").asInstanceOf[Map[String,String]]
