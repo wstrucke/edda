@@ -24,6 +24,8 @@ import java.util.concurrent.TimeUnit
 import com.netflix.servo.monitor.Monitors
 import com.netflix.servo.DefaultMonitorRegistry
 
+import com.amazonaws.AmazonClientException
+
 import org.slf4j.LoggerFactory
 
 /** local state for Crawlers
@@ -56,6 +58,18 @@ abstract class Crawler extends Observable {
 
   private[this] val logger = LoggerFactory.getLogger(getClass)
   lazy val enabled = Utils.getProperty("edda.crawler", "enabled", name, "true")
+
+  /* initial delay in ms between rapid, successive api requests */
+  var request_delay = Utils.getProperty("edda.crawler", "requestDelay", name, "0").get.toInt
+  /* delay iterator for each request when the API limit is reached */
+  val throttle_delay = Utils.getProperty("edda.crawler", "throttleDelay", name, "200").get.toInt
+  /* number of retries attempted */
+  var retry_count = 0
+  /* maximum number of retries before giving up */
+  val retry_max = Utils.getProperty("edda.crawler", "maxDelayMultiplier", name, "225").get.toInt
+  /* using a ratio of 2:1 for errors to retries due to requests being sent concurrently */
+  val errorReducer = 2
+
 
   /** start a crawl if the crawler is enabled */
   def crawl()(implicit req: RequestId) {
@@ -135,9 +149,43 @@ abstract class Crawler extends Observable {
           if (logger.isDebugEnabled) logger.debug(s"$req$this sending: $msg -> $o")
           o ! msg
       })
+      /* reset the error count at the end of each run */
+      retry_count = 0
       setLocalState(state, CrawlerState(records = newRecords))
 
       // } else state
+    }
+  }
+
+  def backoffRequest[T](code: =>T): T = {
+    if (request_delay > 0) Thread sleep request_delay
+    try {
+      if (retry_count > 10) {
+        if (logger.isDebugEnabled) logger.debug(s"$this SLEEPING [" + retry_count.toString + "]: " + ( throttle_delay * (((retry_count-10)/errorReducer) + 1) ).toString)
+        Thread sleep ( throttle_delay * (((retry_count-10)/errorReducer) + 1) )
+      }
+      code
+    } catch {
+      case e: AmazonClientException => {
+        val pattern = ".*Error Code: ([A-Za-z]+);.*".r
+        val pattern(err_code) = e.getMessage()
+        if ( (err_code == "RequestLimitExceeded") || (err_code == "Throttling") ) {
+          Thread sleep ( throttle_delay * ((retry_count/errorReducer) + 1) )
+          retry_count = retry_count + 1
+          if ((retry_count/errorReducer) >= retry_max) {
+            logger.error("Hit configured maximum number of API backoff requests, aborting")
+            throw e
+          }
+          backoffRequest { code }
+        } else {
+          logger.error("Unexpected AmazonClientException, aborting")
+          throw e
+        }
+      }
+      case e: Exception => {
+        logger.error("Unexpected Exception, aborting")
+        throw e
+      }
     }
   }
 
